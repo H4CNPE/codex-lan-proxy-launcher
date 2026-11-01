@@ -1,3 +1,7 @@
+param(
+    [switch]$Startup
+)
+
 $ErrorActionPreference = 'Stop'
 
 $configPath = Join-Path $PSScriptRoot 'proxy-config.json'
@@ -26,28 +30,72 @@ function Show-LauncherMessage([string]$message, [string]$icon = 'Information') {
     [System.Windows.MessageBox]::Show($message, 'Codex LAN Proxy', 'OK', $icon) | Out-Null
 }
 
-Write-LauncherLog "Launcher started for $proxyUrl"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CodexWindow {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+'@
 
-if (Get-Process -Name ChatGPT -ErrorAction SilentlyContinue) {
-    Write-LauncherLog 'Launch refused because ChatGPT.exe is already running'
-    Show-LauncherMessage 'Codex is already running. Fully quit it from the system tray, then use this shortcut again.'
-    exit 1
+function Get-CodexWindowProcesses {
+    @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
 }
 
-$client = [Net.Sockets.TcpClient]::new()
-try {
-    $connect = $client.ConnectAsync($proxyHost, $proxyPort)
-    if (-not $connect.Wait(3000) -or -not $client.Connected) {
-        throw 'The proxy did not respond within 3 seconds.'
+function Show-CodexWindow {
+    $windows = Get-CodexWindowProcesses
+    foreach ($window in $windows) {
+        [CodexWindow]::ShowWindowAsync($window.MainWindowHandle, 9) | Out-Null
+        [CodexWindow]::SetForegroundWindow($window.MainWindowHandle) | Out-Null
+    }
+    return $windows.Count -gt 0
+}
+
+function Hide-CodexWindows {
+    $windows = Get-CodexWindowProcesses
+    foreach ($window in $windows) {
+        [CodexWindow]::ShowWindowAsync($window.MainWindowHandle, 0) | Out-Null
     }
 }
-catch {
-    Write-LauncherLog "Proxy connectivity check failed: $($_.Exception.Message)"
-    Show-LauncherMessage "Cannot reach the LAN proxy at $proxyUrl. Check the proxy device and LAN connection." 'Error'
-    exit 2
+
+Write-LauncherLog "Launcher started for $proxyUrl (Startup=$Startup)"
+
+if (Get-Process -Name ChatGPT -ErrorAction SilentlyContinue) {
+    if ($Startup) {
+        Write-LauncherLog 'Startup launch skipped because ChatGPT.exe is already running'
+        exit 0
+    }
+    $shown = Show-CodexWindow
+    Write-LauncherLog "Existing Codex window restore requested (WindowFound=$shown)"
+    exit 0
 }
-finally {
-    $client.Dispose()
+
+$proxyReady = $false
+$deadline = [DateTime]::UtcNow.AddSeconds($(if ($Startup) { 60 } else { 3 }))
+do {
+    $client = [Net.Sockets.TcpClient]::new()
+    try {
+        $connect = $client.ConnectAsync($proxyHost, $proxyPort)
+        $proxyReady = $connect.Wait(2000) -and $client.Connected
+    }
+    catch {
+        $proxyReady = $false
+    }
+    finally {
+        $client.Dispose()
+    }
+    if (-not $proxyReady -and $Startup) { Start-Sleep -Seconds 2 }
+} while (-not $proxyReady -and [DateTime]::UtcNow -lt $deadline)
+
+if (-not $proxyReady) {
+    Write-LauncherLog 'Proxy connectivity check failed'
+    if (-not $Startup) {
+        Show-LauncherMessage "Cannot reach the LAN proxy at $proxyUrl. Check the proxy device and LAN connection." 'Error'
+    }
+    exit 2
 }
 
 foreach ($name in 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy') {
@@ -65,9 +113,28 @@ if (-not (Test-Path -LiteralPath $executable)) {
     exit 3
 }
 
-$process = Start-Process -FilePath $executable -ArgumentList @(
-    "--proxy-server=$proxyUrl"
+$arguments = @(
+    "--proxy-server=$proxyUrl",
     '--proxy-bypass-list=localhost;127.0.0.1;::1'
-) -PassThru
+)
+if ($Startup) { $arguments += '--start-minimized' }
+
+$startOptions = @{
+    FilePath = $executable
+    ArgumentList = $arguments
+    PassThru = $true
+}
+if ($Startup) { $startOptions.WindowStyle = 'Minimized' }
+
+$process = Start-Process @startOptions
 Write-LauncherLog "Started ChatGPT.exe PID=$($process.Id) with proxy arguments and inherited proxy environment"
+
+if ($Startup) {
+    $hideDeadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        Start-Sleep -Milliseconds 250
+        Hide-CodexWindows
+    } while ([DateTime]::UtcNow -lt $hideDeadline)
+    Write-LauncherLog 'Startup window suppression completed'
+}
 

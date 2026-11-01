@@ -31,7 +31,31 @@
 3. 从系统托盘完全退出已经运行的 Codex。
 4. 双击桌面的 **Codex (LAN Proxy)**。
 
-启动器不会修改系统代理，也不会结束已运行的 Codex。检测到 Codex 正在运行时，它会提示先退出，从而避免中断现有聊天。
+启动器不会修改系统代理，也不会结束已运行的 Codex。检测到 Codex 已在后台运行时，桌面快捷方式会恢复现有窗口，从而避免中断现有聊天。
+
+## 静默开机自启动
+
+Codex 自带的启动任务不会继承本项目设置的代理环境变量，必须先禁用原启动任务，再安装代理自启动入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-Autostart.ps1
+```
+
+安装脚本会：
+
+- 备份并禁用 Codex 原生自启动任务；
+- 在当前用户的“启动”目录创建代理启动快捷方式；
+- 登录 Windows 后等待局域网代理最多 60 秒；
+- 以最小化模式启动并隐藏 Codex 窗口；
+- 保证 Chromium 前端和 Codex 后台进程都继承代理。
+
+开机后需要使用 Codex 时，点击桌面的 **Codex (LAN Proxy)**，启动器会恢复已经在后台运行的窗口。
+
+若要移除代理自启动并恢复原来的 Codex 自启动状态：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-Autostart.ps1
+```
 
 ## 验证
 
